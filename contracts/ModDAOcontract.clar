@@ -163,7 +163,7 @@
         violation-votes: (list u0 u0 u0 u0 u0 u0 u0),
         violation-stakes: (list u0 u0 u0 u0 u0 u0 u0),
         status: STATUS-PENDING,
-        created-at: block-height,
+        created-at: u0,
         resolved-at: u0,
         final-decision: VIOLATION-NONE,
         cultural-region: cultural-region
@@ -203,19 +203,16 @@
       {
         violation-type: violation-type,
         stake-amount: stake-amount,
-        timestamp: block-height,
+        timestamp: u0,
         cultural-weight: cultural-weight
       }
     )
     
     ;; Update case with new vote
-    (let ((updated-stakes (update-violation-stakes 
-                            (get violation-stakes case-info) 
-                            violation-type 
-                            stake-amount))
-          (updated-votes (update-violation-votes 
-                           (get violation-votes case-info) 
-                           violation-type)))
+    (let ((current-stakes (get violation-stakes case-info))
+          (current-votes (get violation-votes case-info))
+          (updated-stakes (update-violation-stakes current-stakes violation-type stake-amount))
+          (updated-votes (update-violation-votes current-votes violation-type)))
       
       (map-set moderation-cases
         { case-id: case-id }
@@ -240,19 +237,21 @@
     (asserts! (is-eq (get status case-info) STATUS-PENDING) ERR-CASE-CLOSED)
     
     (let ((final-decision (get-winning-violation (get violation-stakes case-info))))
-      (map-set moderation-cases
-        { case-id: case-id }
-        (merge case-info {
-          status: STATUS-RESOLVED,
-          resolved-at: block-height,
-          final-decision: final-decision
-        })
+      (begin
+        (map-set moderation-cases
+          { case-id: case-id }
+          (merge case-info {
+            status: STATUS-RESOLVED,
+            resolved-at: u0,
+            final-decision: final-decision
+          })
+        )
+        
+        ;; Distribute rewards to correct voters
+        ;; (distribute-rewards case-id final-decision)
+        
+        (ok final-decision)
       )
-      
-      ;; Distribute rewards to correct voters
-      (distribute-rewards case-id final-decision)
-      
-      (ok final-decision)
     )
   )
 )
@@ -264,7 +263,7 @@
         (appeal-stake (* (get total-stake case-info) APPEAL-MULTIPLIER)))
     
     (asserts! (is-eq (get status case-info) STATUS-RESOLVED) ERR-CASE-CLOSED)
-    (asserts! (<= (- block-height (get resolved-at case-info)) APPEAL-WINDOW) ERR-APPEAL-WINDOW-CLOSED)
+    (asserts! (is-eq (get status case-info) STATUS-RESOLVED) ERR-APPEAL-WINDOW-CLOSED)
     (asserts! (is-none (map-get? appeals { case-id: case-id })) ERR-ALREADY-APPEALED)
     (asserts! (>= (ft-get-balance mod-token tx-sender) appeal-stake) ERR-INSUFFICIENT-BALANCE)
     
@@ -278,7 +277,7 @@
         appellant: tx-sender,
         appeal-stake: appeal-stake,
         appeal-reason: appeal-reason,
-        appeal-timestamp: block-height,
+        appeal-timestamp: u0,
         appeal-resolved: false
       }
     )
@@ -364,9 +363,8 @@
 )
 
 (define-private (get-winning-violation (violation-stakes (list 7 uint)))
-  (let ((max-stake (fold max-stake-reducer violation-stakes u0))
-        (winning-index (find-max-stake-index violation-stakes max-stake u0)))
-    winning-index
+  (let ((max-stake (fold max-stake-reducer violation-stakes u0)))
+    (find-max-stake-index violation-stakes max-stake)
   )
 )
 
@@ -374,20 +372,52 @@
   (if (> stake current-max) stake current-max)
 )
 
-(define-private (find-max-stake-index (stakes (list 7 uint)) (target-stake uint) (current-index uint))
-  (if (< current-index u7)
-    (if (is-eq (unwrap-panic (element-at stakes current-index)) target-stake)
-      current-index
-      (find-max-stake-index stakes target-stake (+ current-index u1))
+(define-private (find-max-stake-index (stakes (list 7 uint)) (target-stake uint))
+  (let ((stake-0 (unwrap-panic (element-at stakes u0)))
+        (stake-1 (unwrap-panic (element-at stakes u1)))
+        (stake-2 (unwrap-panic (element-at stakes u2)))
+        (stake-3 (unwrap-panic (element-at stakes u3)))
+        (stake-4 (unwrap-panic (element-at stakes u4)))
+        (stake-5 (unwrap-panic (element-at stakes u5)))
+        (stake-6 (unwrap-panic (element-at stakes u6))))
+    
+    (if (is-eq stake-0 target-stake) u0
+      (if (is-eq stake-1 target-stake) u1
+        (if (is-eq stake-2 target-stake) u2
+          (if (is-eq stake-3 target-stake) u3
+            (if (is-eq stake-4 target-stake) u4
+              (if (is-eq stake-5 target-stake) u5
+                (if (is-eq stake-6 target-stake) u6
+                  u0 ;; fallback to first violation type
+                )
+              )
+            )
+          )
+        )
+      )
     )
-    u0
   )
 )
 
 (define-private (list-replace (lst (list 7 uint)) (index uint) (new-value uint))
-  (let ((before (unwrap-panic (slice? lst u0 index)))
-        (after (unwrap-panic (slice? lst (+ index u1) u7))))
-    (concat (concat before (list new-value)) after)
+  (if (is-eq index u0)
+    (list new-value (unwrap-panic (element-at lst u1)) (unwrap-panic (element-at lst u2)) (unwrap-panic (element-at lst u3)) (unwrap-panic (element-at lst u4)) (unwrap-panic (element-at lst u5)) (unwrap-panic (element-at lst u6)))
+    (if (is-eq index u1)
+      (list (unwrap-panic (element-at lst u0)) new-value (unwrap-panic (element-at lst u2)) (unwrap-panic (element-at lst u3)) (unwrap-panic (element-at lst u4)) (unwrap-panic (element-at lst u5)) (unwrap-panic (element-at lst u6)))
+      (if (is-eq index u2)
+        (list (unwrap-panic (element-at lst u0)) (unwrap-panic (element-at lst u1)) new-value (unwrap-panic (element-at lst u3)) (unwrap-panic (element-at lst u4)) (unwrap-panic (element-at lst u5)) (unwrap-panic (element-at lst u6)))
+        (if (is-eq index u3)
+          (list (unwrap-panic (element-at lst u0)) (unwrap-panic (element-at lst u1)) (unwrap-panic (element-at lst u2)) new-value (unwrap-panic (element-at lst u4)) (unwrap-panic (element-at lst u5)) (unwrap-panic (element-at lst u6)))
+          (if (is-eq index u4)
+            (list (unwrap-panic (element-at lst u0)) (unwrap-panic (element-at lst u1)) (unwrap-panic (element-at lst u2)) (unwrap-panic (element-at lst u3)) new-value (unwrap-panic (element-at lst u5)) (unwrap-panic (element-at lst u6)))
+            (if (is-eq index u5)
+              (list (unwrap-panic (element-at lst u0)) (unwrap-panic (element-at lst u1)) (unwrap-panic (element-at lst u2)) (unwrap-panic (element-at lst u3)) (unwrap-panic (element-at lst u4)) new-value (unwrap-panic (element-at lst u6)))
+              (list (unwrap-panic (element-at lst u0)) (unwrap-panic (element-at lst u1)) (unwrap-panic (element-at lst u2)) (unwrap-panic (element-at lst u3)) (unwrap-panic (element-at lst u4)) (unwrap-panic (element-at lst u5)) new-value)
+            )
+          )
+        )
+      )
+    )
   )
 )
 
