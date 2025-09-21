@@ -342,3 +342,79 @@
     u1000
   )
 )
+
+
+;; private functions
+(define-private (update-violation-stakes (current-stakes (list 7 uint)) (violation-type uint) (stake-amount uint))
+  (let ((index violation-type))
+    (if (< index u7)
+      (list-replace current-stakes index (+ (unwrap-panic (element-at current-stakes index)) stake-amount))
+      current-stakes
+    )
+  )
+)
+
+(define-private (update-violation-votes (current-votes (list 7 uint)) (violation-type uint))
+  (let ((index violation-type))
+    (if (< index u7)
+      (list-replace current-votes index (+ (unwrap-panic (element-at current-votes index)) u1))
+      current-votes
+    )
+  )
+)
+
+(define-private (get-winning-violation (violation-stakes (list 7 uint)))
+  (let ((max-stake (fold max-stake-reducer violation-stakes u0))
+        (winning-index (find-max-stake-index violation-stakes max-stake u0)))
+    winning-index
+  )
+)
+
+(define-private (max-stake-reducer (stake uint) (current-max uint))
+  (if (> stake current-max) stake current-max)
+)
+
+(define-private (find-max-stake-index (stakes (list 7 uint)) (target-stake uint) (current-index uint))
+  (if (< current-index u7)
+    (if (is-eq (unwrap-panic (element-at stakes current-index)) target-stake)
+      current-index
+      (find-max-stake-index stakes target-stake (+ current-index u1))
+    )
+    u0
+  )
+)
+
+(define-private (list-replace (lst (list 7 uint)) (index uint) (new-value uint))
+  (let ((before (unwrap-panic (slice? lst u0 index)))
+        (after (unwrap-panic (slice? lst (+ index u1) u7))))
+    (concat (concat before (list new-value)) after)
+  )
+)
+
+(define-private (update-moderator-reputation (moderator principal) (case-id uint))
+  (let ((current-rep (default-to 
+                       { total-cases: u0, correct-votes: u0, total-stake: u0, earned-rewards: u0, cultural-regions: (list) }
+                       (map-get? moderator-reputation { moderator: moderator }))))
+    
+    (map-set moderator-reputation
+      { moderator: moderator }
+      (merge current-rep {
+        total-cases: (+ (get total-cases current-rep) u1)
+      })
+    )
+  )
+)
+
+(define-private (distribute-rewards (case-id uint) (winning-violation uint))
+  (let ((case-info (unwrap-panic (map-get? moderation-cases { case-id: case-id }))))
+    ;; Implementation would iterate through voters and reward those who voted correctly
+    ;; This is a simplified version - full implementation would require more complex iteration
+    (ok true)
+  )
+)
+
+;; Initialize contract
+(begin
+  (try! (ft-mint? mod-token u1000000 CONTRACT-OWNER))
+  (ok true)
+)
