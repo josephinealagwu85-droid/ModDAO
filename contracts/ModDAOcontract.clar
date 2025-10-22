@@ -33,6 +33,10 @@
 (define-constant ERR-APPEAL-WINDOW-CLOSED (err u108))
 (define-constant ERR-INSUFFICIENT-STAKE (err u109))
 (define-constant ERR-ALREADY-APPEALED (err u110))
+(define-constant ERR-CONTRACT-PAUSED (err u111))
+(define-constant ERR-RATE-LIMIT-EXCEEDED (err u112))
+(define-constant ERR-OVERFLOW (err u113))
+(define-constant ERR-UNDERFLOW (err u114))
 
 (define-constant VIOLATION-NONE u0)
 (define-constant VIOLATION-HARASSMENT u1)
@@ -51,9 +55,14 @@
 (define-constant APPEAL-WINDOW u144) ;; blocks (~1 day)
 (define-constant APPEAL-MULTIPLIER u2)
 
+;; Rate limiting constants
+(define-constant RATE-LIMIT-BLOCKS u10)
+(define-constant MAX-OPERATIONS-PER-BLOCK u5)
+
 ;; data vars
 (define-data-var case-id-nonce uint u0)
 (define-data-var platform-id-nonce uint u0)
+(define-data-var contract-paused bool false)
 
 ;; data maps
 (define-map platforms
@@ -125,9 +134,80 @@
   }
 )
 
+(define-map last-operation-block principal uint)
+(define-map operations-per-block {user: principal, block: uint} uint)
+
+;; Security helper functions
+(define-private (safe-add (a uint) (b uint))
+  (let ((result (+ a b)))
+    (asserts! (>= result a) ERR-OVERFLOW)
+    (ok result)
+  )
+)
+
+(define-private (safe-sub (a uint) (b uint))
+  (if (>= a b)
+    (ok (- a b))
+    ERR-UNDERFLOW
+  )
+)
+
+(define-private (safe-mul (a uint) (b uint))
+  (let ((result (* a b)))
+    (asserts! (or (is-eq b u0) (is-eq (/ result b) a)) ERR-OVERFLOW)
+    (ok result)
+  )
+)
+
+(define-private (check-rate-limit (user principal))
+  (let (
+    (current-block burn-block-height)
+    (last-block (default-to u0 (map-get? last-operation-block user)))
+    (ops-count (default-to u0 (map-get? operations-per-block {user: user, block: current-block})))
+  )
+    (asserts! 
+      (or 
+        (>= (- current-block last-block) RATE-LIMIT-BLOCKS)
+        (< ops-count MAX-OPERATIONS-PER-BLOCK)
+      )
+      ERR-RATE-LIMIT-EXCEEDED
+    )
+    (map-set last-operation-block user current-block)
+    (map-set operations-per-block {user: user, block: current-block} (+ ops-count u1))
+    (ok true)
+  )
+)
+
+(define-private (validate-string-not-empty (str (string-ascii 50)))
+  (if (> (len str) u0)
+    (ok true)
+    ERR-INVALID-AMOUNT
+  )
+)
+
 ;; public functions
+
+;; Pause/unpause contract (owner only)
+(define-public (pause-contract)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-OWNER-ONLY)
+    (var-set contract-paused true)
+    (ok true)
+  )
+)
+
+(define-public (unpause-contract)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-OWNER-ONLY)
+    (var-set contract-paused false)
+    (ok true)
+  )
+)
 (define-public (register-platform (name (string-ascii 50)))
-  (let ((platform-id (+ (var-get platform-id-nonce) u1)))
+  (let ((platform-id (unwrap! (safe-add (var-get platform-id-nonce) u1) ERR-OVERFLOW)))
+    (asserts! (not (var-get contract-paused)) ERR-CONTRACT-PAUSED)
+    (try! (check-rate-limit tx-sender))
+    (try! (validate-string-not-empty name))
     (var-set platform-id-nonce platform-id)
     (map-set platforms
       { platform-id: platform-id }
@@ -147,9 +227,11 @@
   (platform-id uint) 
   (content-hash (buff 32)) 
   (cultural-region (string-ascii 10)))
-  (let ((case-id (+ (var-get case-id-nonce) u1))
+  (let ((case-id (unwrap! (safe-add (var-get case-id-nonce) u1) ERR-OVERFLOW))
         (platform-info (unwrap! (map-get? platforms { platform-id: platform-id }) ERR-INVALID-PLATFORM)))
     
+    (asserts! (not (var-get contract-paused)) ERR-CONTRACT-PAUSED)
+    (try! (check-rate-limit tx-sender))
     (asserts! (is-eq (get owner platform-info) tx-sender) ERR-NOT-TOKEN-OWNER)
     
     (var-set case-id-nonce case-id)
@@ -163,7 +245,7 @@
         violation-votes: (list u0 u0 u0 u0 u0 u0 u0),
         violation-stakes: (list u0 u0 u0 u0 u0 u0 u0),
         status: STATUS-PENDING,
-        created-at: u0,
+        created-at: burn-block-height,
         resolved-at: u0,
         final-decision: VIOLATION-NONE,
         cultural-region: cultural-region
@@ -173,7 +255,7 @@
     ;; Update platform stats
     (map-set platforms
       { platform-id: platform-id }
-      (merge platform-info { total-cases: (+ (get total-cases platform-info) u1) })
+      (merge platform-info { total-cases: (unwrap! (safe-add (get total-cases platform-info) u1) ERR-OVERFLOW) })
     )
     
     (ok case-id)
@@ -188,6 +270,8 @@
   (let ((case-info (unwrap! (map-get? moderation-cases { case-id: case-id }) ERR-CASE-NOT-FOUND))
         (existing-vote (map-get? moderator-votes { case-id: case-id, moderator: tx-sender })))
     
+    (asserts! (not (var-get contract-paused)) ERR-CONTRACT-PAUSED)
+    (try! (check-rate-limit tx-sender))
     (asserts! (is-none existing-vote) ERR-ALREADY-VOTED)
     (asserts! (is-eq (get status case-info) STATUS-PENDING) ERR-CASE-CLOSED)
     (asserts! (>= stake-amount MIN-STAKE) ERR-INSUFFICIENT-STAKE)
@@ -203,7 +287,7 @@
       {
         violation-type: violation-type,
         stake-amount: stake-amount,
-        timestamp: u0,
+        timestamp: burn-block-height,
         cultural-weight: cultural-weight
       }
     )
@@ -217,7 +301,7 @@
       (map-set moderation-cases
         { case-id: case-id }
         (merge case-info {
-          total-stake: (+ (get total-stake case-info) stake-amount),
+          total-stake: (unwrap! (safe-add (get total-stake case-info) stake-amount) ERR-OVERFLOW),
           violation-stakes: updated-stakes,
           violation-votes: updated-votes
         })
@@ -242,7 +326,7 @@
           { case-id: case-id }
           (merge case-info {
             status: STATUS-RESOLVED,
-            resolved-at: u0,
+            resolved-at: burn-block-height,
             final-decision: final-decision
           })
         )
@@ -260,10 +344,11 @@
   (case-id uint) 
   (appeal-reason (string-utf8 500)))
   (let ((case-info (unwrap! (map-get? moderation-cases { case-id: case-id }) ERR-CASE-NOT-FOUND))
-        (appeal-stake (* (get total-stake case-info) APPEAL-MULTIPLIER)))
+        (appeal-stake (unwrap! (safe-mul (get total-stake case-info) APPEAL-MULTIPLIER) ERR-OVERFLOW)))
     
+    (asserts! (not (var-get contract-paused)) ERR-CONTRACT-PAUSED)
     (asserts! (is-eq (get status case-info) STATUS-RESOLVED) ERR-CASE-CLOSED)
-    (asserts! (is-eq (get status case-info) STATUS-RESOLVED) ERR-APPEAL-WINDOW-CLOSED)
+    (asserts! (<= (unwrap! (safe-sub burn-block-height (get resolved-at case-info)) ERR-UNDERFLOW) APPEAL-WINDOW) ERR-APPEAL-WINDOW-CLOSED)
     (asserts! (is-none (map-get? appeals { case-id: case-id })) ERR-ALREADY-APPEALED)
     (asserts! (>= (ft-get-balance mod-token tx-sender) appeal-stake) ERR-INSUFFICIENT-BALANCE)
     
@@ -277,7 +362,7 @@
         appellant: tx-sender,
         appeal-stake: appeal-stake,
         appeal-reason: appeal-reason,
-        appeal-timestamp: u0,
+        appeal-timestamp: burn-block-height,
         appeal-resolved: false
       }
     )
@@ -342,12 +427,24 @@
   )
 )
 
+;; NEW: Security read-only functions
+(define-read-only (is-contract-paused)
+  (var-get contract-paused)
+)
+
+(define-read-only (get-last-operation-block (user principal))
+  (default-to u0 (map-get? last-operation-block user))
+)
+
+(define-read-only (get-operations-count (user principal) (block uint))
+  (default-to u0 (map-get? operations-per-block {user: user, block: block}))
+)
 
 ;; private functions
 (define-private (update-violation-stakes (current-stakes (list 7 uint)) (violation-type uint) (stake-amount uint))
   (let ((index violation-type))
     (if (< index u7)
-      (list-replace current-stakes index (+ (unwrap-panic (element-at current-stakes index)) stake-amount))
+      (list-replace current-stakes index (unwrap-panic (safe-add (unwrap-panic (element-at current-stakes index)) stake-amount)))
       current-stakes
     )
   )
@@ -429,7 +526,7 @@
     (map-set moderator-reputation
       { moderator: moderator }
       (merge current-rep {
-        total-cases: (+ (get total-cases current-rep) u1)
+        total-cases: (unwrap-panic (safe-add (get total-cases current-rep) u1))
       })
     )
   )
