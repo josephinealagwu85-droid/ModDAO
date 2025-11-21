@@ -1,11 +1,14 @@
 
 {
-  "name": "ModDAO-tests",
+  "name": "ModDAO-frontend",
   "version": "1.0.0",
-  "description": "Run unit tests on this project.",
+  "description": "React frontend for ModDAO decentralized content moderation platform",
   "type": "module",
   "private": true,
   "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
     "test": "vitest run",
     "test:report": "vitest run -- --coverage --costs",
     "test:watch": "chokidar \"tests/**/*.ts\" \"contracts/**/*.clar\" -c \"npm run test:report\""
@@ -14,10 +17,22 @@
   "license": "ISC",
   "dependencies": {
     "@hirosystems/clarinet-sdk": "^3.0.2",
+    "@stacks/connect": "^7.7.1",
     "@stacks/transactions": "^7.0.6",
     "@types/node": "^22.15.18",
     "chokidar-cli": "^3.0.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "vite": "^6.0.1",
     "vitest": "^3.1.3",
     "vitest-environment-clarinet": "^2.3.0"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "tailwindcss": "^3.4.16",
+    "autoprefixer": "^10.4.20",
+    "postcss": "^8.5.0"
   }
 }

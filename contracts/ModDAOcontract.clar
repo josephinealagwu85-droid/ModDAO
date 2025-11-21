@@ -37,6 +37,11 @@
 (define-constant ERR-RATE-LIMIT-EXCEEDED (err u112))
 (define-constant ERR-OVERFLOW (err u113))
 (define-constant ERR-UNDERFLOW (err u114))
+(define-constant ERR-UNAUTHORIZED (err u115))
+(define-constant ERR-INVALID-CONTENT-HASH (err u116))
+(define-constant ERR-INVALID-CULTURAL-REGION (err u117))
+(define-constant ERR-EMERGENCY-WITHDRAWAL (err u118))
+(define-constant ERR-REENTRANCY (err u119))
 
 (define-constant VIOLATION-NONE u0)
 (define-constant VIOLATION-HARASSMENT u1)
@@ -63,6 +68,10 @@
 (define-data-var case-id-nonce uint u0)
 (define-data-var platform-id-nonce uint u0)
 (define-data-var contract-paused bool false)
+(define-data-var emergency-mode bool false)
+(define-data-var min-moderators-required uint u3)
+(define-data-var max-stake-per-vote uint u100000)
+(define-data-var reentrancy-guard bool false)
 
 ;; data maps
 (define-map platforms
@@ -136,6 +145,9 @@
 
 (define-map last-operation-block principal uint)
 (define-map operations-per-block {user: principal, block: uint} uint)
+(define-map authorized-admins principal bool)
+(define-map blacklisted-users principal bool)
+(define-map case-moderator-count uint uint)
 
 ;; Security helper functions
 (define-private (safe-add (a uint) (b uint))
@@ -185,6 +197,46 @@
   )
 )
 
+(define-private (validate-content-hash (hash (buff 32)))
+  (if (is-eq (len hash) u32)
+    (ok true)
+    ERR-INVALID-CONTENT-HASH
+  )
+)
+
+(define-private (validate-cultural-region (region (string-ascii 10)))
+  (if (and (> (len region) u0) (<= (len region) u10))
+    (ok true)
+    ERR-INVALID-CULTURAL-REGION
+  )
+)
+
+(define-private (check-reentrancy)
+  (begin
+    (asserts! (not (var-get reentrancy-guard)) ERR-REENTRANCY)
+    (var-set reentrancy-guard true)
+    (ok true)
+  )
+)
+
+(define-private (clear-reentrancy)
+  (begin
+    (var-set reentrancy-guard false)
+    (ok true)
+  )
+)
+
+(define-private (is-authorized-admin (user principal))
+  (or 
+    (is-eq user CONTRACT-OWNER)
+    (default-to false (map-get? authorized-admins user))
+  )
+)
+
+(define-private (is-blacklisted (user principal))
+  (default-to false (map-get? blacklisted-users user))
+)
+
 ;; public functions
 
 ;; Pause/unpause contract (owner only)
@@ -203,9 +255,89 @@
     (ok true)
   )
 )
+
+;; Emergency functions
+(define-public (enable-emergency-mode)
+  (begin
+    (asserts! (is-authorized-admin tx-sender) ERR-UNAUTHORIZED)
+    (var-set emergency-mode true)
+    (var-set contract-paused true)
+    (ok true)
+  )
+)
+
+(define-public (disable-emergency-mode)
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-OWNER-ONLY)
+    (var-set emergency-mode false)
+    (ok true)
+  )
+)
+
+(define-public (emergency-withdraw (amount uint) (recipient principal))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-OWNER-ONLY)
+    (asserts! (var-get emergency-mode) ERR-EMERGENCY-WITHDRAWAL)
+    (as-contract (ft-transfer? mod-token amount tx-sender recipient))
+  )
+)
+
+;; Admin management
+(define-public (add-admin (admin principal))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-OWNER-ONLY)
+    (map-set authorized-admins admin true)
+    (ok true)
+  )
+)
+
+(define-public (remove-admin (admin principal))
+  (begin
+    (asserts! (is-eq tx-sender CONTRACT-OWNER) ERR-OWNER-ONLY)
+    (map-set authorized-admins admin false)
+    (ok true)
+  )
+)
+
+;; User management
+(define-public (blacklist-user (user principal))
+  (begin
+    (asserts! (is-authorized-admin tx-sender) ERR-UNAUTHORIZED)
+    (map-set blacklisted-users user true)
+    (ok true)
+  )
+)
+
+(define-public (remove-from-blacklist (user principal))
+  (begin
+    (asserts! (is-authorized-admin tx-sender) ERR-UNAUTHORIZED)
+    (map-set blacklisted-users user false)
+    (ok true)
+  )
+)
+
+;; Configuration updates
+(define-public (update-min-moderators (new-min uint))
+  (begin
+    (asserts! (is-authorized-admin tx-sender) ERR-UNAUTHORIZED)
+    (asserts! (and (>= new-min u1) (<= new-min u10)) ERR-INVALID-AMOUNT)
+    (var-set min-moderators-required new-min)
+    (ok true)
+  )
+)
+
+(define-public (update-max-stake (new-max uint))
+  (begin
+    (asserts! (is-authorized-admin tx-sender) ERR-UNAUTHORIZED)
+    (asserts! (>= new-max MIN-STAKE) ERR-INVALID-AMOUNT)
+    (var-set max-stake-per-vote new-max)
+    (ok true)
+  )
+)
 (define-public (register-platform (name (string-ascii 50)))
   (let ((platform-id (unwrap! (safe-add (var-get platform-id-nonce) u1) ERR-OVERFLOW)))
     (asserts! (not (var-get contract-paused)) ERR-CONTRACT-PAUSED)
+    (asserts! (not (is-blacklisted tx-sender)) ERR-UNAUTHORIZED)
     (try! (check-rate-limit tx-sender))
     (try! (validate-string-not-empty name))
     (var-set platform-id-nonce platform-id)
@@ -231,7 +363,10 @@
         (platform-info (unwrap! (map-get? platforms { platform-id: platform-id }) ERR-INVALID-PLATFORM)))
     
     (asserts! (not (var-get contract-paused)) ERR-CONTRACT-PAUSED)
+    (asserts! (not (is-blacklisted tx-sender)) ERR-UNAUTHORIZED)
     (try! (check-rate-limit tx-sender))
+    (try! (validate-content-hash content-hash))
+    (try! (validate-cultural-region cultural-region))
     (asserts! (is-eq (get owner platform-info) tx-sender) ERR-NOT-TOKEN-OWNER)
     
     (var-set case-id-nonce case-id)
@@ -258,6 +393,9 @@
       (merge platform-info { total-cases: (unwrap! (safe-add (get total-cases platform-info) u1) ERR-OVERFLOW) })
     )
     
+    ;; Initialize moderator count for case
+    (map-set case-moderator-count case-id u0)
+    
     (ok case-id)
   )
 )
@@ -268,14 +406,19 @@
   (stake-amount uint)
   (cultural-weight uint))
   (let ((case-info (unwrap! (map-get? moderation-cases { case-id: case-id }) ERR-CASE-NOT-FOUND))
-        (existing-vote (map-get? moderator-votes { case-id: case-id, moderator: tx-sender })))
+        (existing-vote (map-get? moderator-votes { case-id: case-id, moderator: tx-sender }))
+        (moderator-count (default-to u0 (map-get? case-moderator-count case-id))))
     
     (asserts! (not (var-get contract-paused)) ERR-CONTRACT-PAUSED)
+    (asserts! (not (is-blacklisted tx-sender)) ERR-UNAUTHORIZED)
     (try! (check-rate-limit tx-sender))
+    (try! (check-reentrancy))
     (asserts! (is-none existing-vote) ERR-ALREADY-VOTED)
     (asserts! (is-eq (get status case-info) STATUS-PENDING) ERR-CASE-CLOSED)
     (asserts! (>= stake-amount MIN-STAKE) ERR-INSUFFICIENT-STAKE)
+    (asserts! (<= stake-amount (var-get max-stake-per-vote)) ERR-INVALID-AMOUNT)
     (asserts! (<= violation-type VIOLATION-VIOLENCE) ERR-INVALID-AMOUNT)
+    (asserts! (<= cultural-weight u100) ERR-INVALID-AMOUNT)
     (asserts! (>= (ft-get-balance mod-token tx-sender) stake-amount) ERR-INSUFFICIENT-BALANCE)
     
     ;; Transfer stake to contract
@@ -311,14 +454,22 @@
     ;; Update moderator reputation
     (update-moderator-reputation tx-sender case-id)
     
+    ;; Update moderator count
+    (map-set case-moderator-count case-id (+ moderator-count u1))
+    
+    ;; Clear reentrancy guard
+    (unwrap-panic (clear-reentrancy))
+    
     (ok true)
   )
 )
 
 (define-public (resolve-case (case-id uint))
-  (let ((case-info (unwrap! (map-get? moderation-cases { case-id: case-id }) ERR-CASE-NOT-FOUND)))
+  (let ((case-info (unwrap! (map-get? moderation-cases { case-id: case-id }) ERR-CASE-NOT-FOUND))
+        (moderator-count (default-to u0 (map-get? case-moderator-count case-id))))
     
     (asserts! (is-eq (get status case-info) STATUS-PENDING) ERR-CASE-CLOSED)
+    (asserts! (>= moderator-count (var-get min-moderators-required)) ERR-INSUFFICIENT-STAKE)
     
     (let ((final-decision (get-winning-violation (get violation-stakes case-info))))
       (begin
@@ -347,6 +498,8 @@
         (appeal-stake (unwrap! (safe-mul (get total-stake case-info) APPEAL-MULTIPLIER) ERR-OVERFLOW)))
     
     (asserts! (not (var-get contract-paused)) ERR-CONTRACT-PAUSED)
+    (asserts! (not (is-blacklisted tx-sender)) ERR-UNAUTHORIZED)
+    (try! (check-reentrancy))
     (asserts! (is-eq (get status case-info) STATUS-RESOLVED) ERR-CASE-CLOSED)
     (asserts! (<= (unwrap! (safe-sub burn-block-height (get resolved-at case-info)) ERR-UNDERFLOW) APPEAL-WINDOW) ERR-APPEAL-WINDOW-CLOSED)
     (asserts! (is-none (map-get? appeals { case-id: case-id })) ERR-ALREADY-APPEALED)
@@ -372,6 +525,9 @@
       { case-id: case-id }
       (merge case-info { status: STATUS-APPEALED })
     )
+    
+    ;; Clear reentrancy guard
+    (unwrap-panic (clear-reentrancy))
     
     (ok true)
   )
@@ -438,6 +594,30 @@
 
 (define-read-only (get-operations-count (user principal) (block uint))
   (default-to u0 (map-get? operations-per-block {user: user, block: block}))
+)
+
+(define-read-only (is-emergency-mode)
+  (var-get emergency-mode)
+)
+
+(define-read-only (get-min-moderators-required)
+  (var-get min-moderators-required)
+)
+
+(define-read-only (get-max-stake-per-vote)
+  (var-get max-stake-per-vote)
+)
+
+(define-read-only (is-admin (user principal))
+  (is-authorized-admin user)
+)
+
+(define-read-only (is-user-blacklisted (user principal))
+  (is-blacklisted user)
+)
+
+(define-read-only (get-case-moderator-count (case-id uint))
+  (default-to u0 (map-get? case-moderator-count case-id))
 )
 
 ;; private functions
